@@ -9,8 +9,6 @@
 #include <mach/machine.h>
 using namespace std;
 
-#define CHECK_MASK (uint32_t(-1) ^ 0x0F)
-
 template<typename T>
 T reverse(T val, bool is_reverse = true)
 {
@@ -27,10 +25,9 @@ T reverse(T val, bool is_reverse = true)
 	return val;
 }
 
-void symtab_command_parse(fstream &is, uint32_t offset, bool is_reverse)
+void symtab_command_parse(fstream &is, bool is_reverse)
 {
 	printf("symtab_command_parse\n");
-	is.seekg(offset);
 
 	symtab_command symtab;
 	is.read((char*)&symtab, sizeof(symtab));
@@ -40,61 +37,52 @@ void symtab_command_parse(fstream &is, uint32_t offset, bool is_reverse)
 	printf("symtab.symoff: %u\n", reverse(symtab.symoff, is_reverse));
 	printf("symtab.nsyms: %u\n", reverse(symtab.nsyms, is_reverse));
 	printf("symtab.stroff: %u\n", reverse(symtab.stroff, is_reverse));
+	printf("symtab.strsize: %u\n\n", reverse(symtab.strsize, is_reverse));
 
-	vector<string> tabl_str(1);
+	vector<char> str_buf(symtab.strsize);	
 	is.seekg(symtab.stroff);	
-	for (uint32_t i = 0; i < symtab.strsize; ++i)
-	{	
-		char ch;
-		is >> ch;
-		if (ch == '\0')
-				tabl_str.push_back(string());
-		else
-			tabl_str.back().push_back(ch);
-		
-	}
+	is.read((char*)str_buf.data(), str_buf.size());
 
-	is.seekg(reverse(symtab.symoff, is_reverse));
+	is.seekg(reverse(symtab.symoff, is_reverse));	
 	for (uint32_t i = 0; i < reverse(symtab.nsyms, is_reverse); ++i)
 	{		
 		nlist_64 cur_list;
 		is.read((char*)&cur_list, sizeof(cur_list));
 
-		if (cur_list.n_un.n_strx < tabl_str.size())
+		printf("%d %x %x %x %x\n", cur_list.n_un.n_strx, cur_list.n_type, cur_list.n_sect, cur_list.n_desc, cur_list.n_value);
+		if (cur_list.n_un.n_strx < str_buf.size())
 		{
-			if (tabl_str[cur_list.n_un.n_strx].find("dlsym") != string::npos)
-			{
-				cout << tabl_str[cur_list.n_un.n_strx] << " "  << tabl_str[cur_list.n_un.n_strx].size() << endl;
-				printf("%x %x %x %x\n", cur_list.n_type, cur_list.n_sect, cur_list.n_desc, cur_list.n_value);
-			}
+			const char *foo_name = str_buf.data() + cur_list.n_un.n_strx;
+			printf("%s\n", foo_name);
 		}
 	}
 }
 
-void mach_parse(fstream &is, uint32_t offset, bool is_x64)
+void mach_parse(fstream &is)
 {	
-	printf("\nmach_parse\n");
-	is.seekg(offset);
-
+	printf("mach_parse\n");
 	mach_header_64 header;
 	is.read((char*)&header, sizeof(header));
 
 	bool is_reverse = false;
-	if ((header.magic & CHECK_MASK) == (MH_MAGIC & CHECK_MASK))
+	switch (header.magic)
 	{
-		is_reverse = false;
-	}
-	else if ((header.magic & CHECK_MASK) == (MH_CIGAM & CHECK_MASK))
-	{
-		is_reverse = true;
-	}
-	else
-	{
-		printf("invalid file\n");
-		exit(-1);
+		case MH_MAGIC:
+		case MH_MAGIC_64:
+			break;
+		case MH_CIGAM:
+		case MH_CIGAM_64:
+		{
+			is_reverse = true;
+			break;
+		}
+		default:	
+		{
+			printf("invalid header magic\n");			
+			exit(-1);
+		}
 	}
 
-	printf("is_reverse: %d\n", is_reverse);
 	printf("header.magic: %p\n", (void*)reverse(header.magic, is_reverse));	
 	printf("header.sizeofcmds: %u\n", reverse(header.sizeofcmds, is_reverse));
 	printf("header.ncmds: %u\n", reverse(header.ncmds, is_reverse));
@@ -110,9 +98,10 @@ void mach_parse(fstream &is, uint32_t offset, bool is_x64)
 			printf("load_cmd.cmd: %p\n", (void*)reverse(load_cmd.cmd, is_reverse));
 			printf("load_cmd.cmdsize: %u\n", reverse(load_cmd.cmdsize, is_reverse));					
 
-			streamoff cur_off = is.tellg();
-			symtab_command_parse(is, is.tellg() - (streamoff)sizeof(load_cmd), is_reverse);
-			is.seekg(cur_off);
+			streamoff prev_offset = is.tellg();
+			is.seekg(is.tellg() - (streamoff)sizeof(load_cmd));
+			symtab_command_parse(is, is_reverse);
+			is.seekg(prev_offset);
 
 			printf("load cmd #%u: end\n\n", i);
 		}
@@ -121,32 +110,29 @@ void mach_parse(fstream &is, uint32_t offset, bool is_x64)
 	}
 }
 
-int main(void)
+void parse_fat(fstream &is)
 {
-	const char *file_path = "/usr/lib/system/libdyld.dylib";
-
-	fstream is;
-	is.open(file_path, ios::binary | ios::in);
-
+	printf("parse_fat\n");
 	fat_header f_header;
 	is.read((char*)&f_header, sizeof(f_header));
-
 	bool is_reverse = false;
-	if (f_header.magic == FAT_MAGIC)
+
+	switch (f_header.magic)
 	{
-		is_reverse = false;
-	}
-	else if (f_header.magic == FAT_CIGAM)
-	{
-		is_reverse = true;
-	}
-	else
-	{
-		printf("invalid file\n");
-		exit(-1);
+		case FAT_MAGIC:
+			break;
+		case FAT_CIGAM:
+		{
+			is_reverse = true;	
+			break;
+		}		
+		default:	
+		{
+			printf("invalid fat magic\n");			
+			exit(-1);
+		}
 	}
 
-	printf("is_reverse: %d\n", is_reverse);
 	printf("f_header.magic: %p\n", (void*)reverse(f_header.magic, is_reverse));
 	printf("f_header.nfat_arch: %p\n", (void*)reverse(f_header.nfat_arch, is_reverse));
 
@@ -161,10 +147,48 @@ int main(void)
 		if (is_x64 && sizeof(void*) == 8 ||
 			!is_x64 && sizeof(void*) != 8)
 		{
-			streamoff cur_off = is.tellg();
-			mach_parse(is, reverse(arch.offset, is_reverse), is_x64);	
-			is.seekg(cur_off);
+			streamoff prev_offset = is.tellg();
+			is.seekg(reverse(arch.offset, is_reverse));
+			mach_parse(is);	
+			is.seekg(prev_offset);
+		}
+	}
+}
+
+int main(void)
+{
+	const char *arr_lib[] = { "/usr/lib/system/libdyld.dylib", "/usr/lib/libSystem.B.dylib", "/Users/andrew/testlib/build/libtest.dylib" };
+	const char *file_path = arr_lib[2];
+
+	fstream is;
+	is.open(file_path, ios::binary | ios::in);
+
+	streamoff prev_offset = is.tellg();
+	uint32_t magic;
+	is.read((char*)&magic, sizeof(magic));
+	is.seekg(prev_offset);
+
+	switch (magic)
+	{
+		case FAT_MAGIC:
+		case FAT_CIGAM:
+		{
+			parse_fat(is);		
+			break;
+		}
+		case MH_MAGIC:
+		case MH_MAGIC_64:
+		case MH_CIGAM:
+		case MH_CIGAM_64:
+		{
+			mach_parse(is);		
+			break;
+		}
+		default:	
+		{
+			printf("invalid file\n");			
+			break;
 		}
 	}
 	return 0;
-}	
+}
