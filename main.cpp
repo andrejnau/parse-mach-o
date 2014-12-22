@@ -7,6 +7,7 @@
 #include <mach-o/fat.h>
 #include <mach-o/nlist.h>
 #include <mach/machine.h>
+#include <dlfcn.h>
 using namespace std;
 
 template<typename T>
@@ -25,7 +26,14 @@ T reverse(T val, bool is_reverse = true)
 	return val;
 }
 
-void symtab_command_parse(fstream &is, bool is_reverse)
+void* get_base()
+{
+	Dl_info info;
+	dladdr((const void* )dlclose, &info);
+	return info.dli_fbase;
+}
+
+void symtab_command_parse(fstream &is, uint32_t offset, bool is_reverse)
 {
 	printf("symtab_command_parse\n");
 
@@ -38,28 +46,33 @@ void symtab_command_parse(fstream &is, bool is_reverse)
 	printf("symtab.nsyms: %u\n", reverse(symtab.nsyms, is_reverse));
 	printf("symtab.stroff: %u\n", reverse(symtab.stroff, is_reverse));
 	printf("symtab.strsize: %u\n\n", reverse(symtab.strsize, is_reverse));
-
 	vector<char> str_buf(symtab.strsize);	
-	is.seekg(symtab.stroff);	
+	is.seekg(offset +  symtab.stroff ) ;	
 	is.read((char*)str_buf.data(), str_buf.size());
 
-	is.seekg(reverse(symtab.symoff, is_reverse));	
+	is.seekg(reverse(offset + symtab.symoff, is_reverse));	
 	for (uint32_t i = 0; i < reverse(symtab.nsyms, is_reverse); ++i)
 	{		
 		nlist_64 cur_list;
 		is.read((char*)&cur_list, sizeof(cur_list));
 
-		printf("%d %x %x %x %x\n", cur_list.n_un.n_strx, cur_list.n_type, cur_list.n_sect, cur_list.n_desc, cur_list.n_value);
+	
 		if (cur_list.n_un.n_strx < str_buf.size())
 		{
 			const char *foo_name = str_buf.data() + cur_list.n_un.n_strx;
-			printf("%s\n", foo_name);
+			if (strcmp(foo_name, "_dlsym") == 0)
+			{
+				printf("%s\n", foo_name);
+				printf("%d %x %x %x %x\n", cur_list.n_un.n_strx, cur_list.n_type, cur_list.n_sect, cur_list.n_desc, cur_list.n_value);
+				printf("%p %p\n", (char*)get_base() + cur_list.n_value, dlsym);
+			}
 		}
 	}
 }
 
 void mach_parse(fstream &is)
-{	
+{
+	uint32_t offset = (uint32_t)is.tellg();
 	printf("mach_parse\n");
 	mach_header_64 header;
 	is.read((char*)&header, sizeof(header));
@@ -100,7 +113,7 @@ void mach_parse(fstream &is)
 
 			streamoff prev_offset = is.tellg();
 			is.seekg(is.tellg() - (streamoff)sizeof(load_cmd));
-			symtab_command_parse(is, is_reverse);
+			symtab_command_parse(is, offset, is_reverse);
 			is.seekg(prev_offset);
 
 			printf("load cmd #%u: end\n\n", i);
@@ -153,12 +166,13 @@ void parse_fat(fstream &is)
 			is.seekg(prev_offset);
 		}
 	}
+
 }
 
-int main(void)
+void find_in_file()
 {
 	const char *arr_lib[] = { "/usr/lib/system/libdyld.dylib", "/usr/lib/libSystem.B.dylib", "/Users/andrew/testlib/build/libtest.dylib" };
-	const char *file_path = arr_lib[2];
+	const char *file_path = arr_lib[0];
 
 	fstream is;
 	is.open(file_path, ios::binary | ios::in);
@@ -190,5 +204,50 @@ int main(void)
 			break;
 		}
 	}
+}
+
+void * get_addres(const char * ponter, const void * base_addr, const char * func_name)
+{
+	symtab_command *symtab = (symtab_command*)ponter;
+	
+	printf("symtab.cmd: %p\n", (void*)symtab->cmd);
+	printf("symtab.cmdsize: %u\n", symtab->cmdsize);	
+	printf("symtab.symoff: %u\n", symtab->symoff);
+	printf("symtab.nsyms: %u\n", symtab->nsyms);
+	printf("symtab.stroff: %u\n", symtab->stroff);
+	printf("symtab.strsize: %u\n\n", symtab->strsize);
+
+	const char * str_buf = (const char * )base_addr + symtab->stroff - symtab->symoff; //incorrect offset
+	return 0;
+}
+
+void* manual_dlsym(const char * filename, const void * base_addr, const char * func_name)
+{
+	printf("%s %p %s %p\n", filename, base_addr, func_name, *(uint32_t*)base_addr);
+	const char * ponter = (const char * )base_addr;
+	mach_header_64 *header = (mach_header_64*)ponter;
+	ponter += sizeof(mach_header_64);
+	for (uint32_t i = 0; i < header->ncmds; ++i)
+	{		
+		load_command *load_cmd = (load_command*)ponter;
+		if (load_cmd->cmd == LC_SYMTAB)
+		{
+			printf("load cmd #%u: begin\n", i);		
+			get_addres(ponter, base_addr, func_name);
+		}
+		ponter += load_cmd->cmdsize;
+	}
+}
+
+void * get_dlsym()
+{
+	Dl_info info;
+	dladdr((const void* )dlclose, &info);
+	return manual_dlsym("/usr/lib/system/libdyld.dylib", info.dli_fbase, "_dlsym");
+}
+
+int main(void)
+{
+	find_in_file();
 	return 0;
 }
